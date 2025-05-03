@@ -2196,25 +2196,14 @@ class AShareMarket:
 
         return data
 
-    #A2ME（Assets to marketcap）##这个因子好像在1555-1561行已经出现过了
-    def calc_am(self):
-        total_assets = self.get_data('FS_Combas', 'A001000000')
-        market_equity = self.get_data('TRD_Mnth', 'Msmvosd')
-        market_equity = market_equity*1000
-        amq = total_assets / market_equity
-        return amq
+
 
     #AT（Total Assets）
     def calc_at(self):
         total_assets = self.get_data('FS_Combas', 'A001000000')
         return total_assets
 
-    #LME（Size）
-    def calc_lme(self):
-        price = self.get_data('TRD_Mnth', 'Mclsprc')    # 收盘价
-        shares_outstanding = self.get_data('TRD_Mnth', 'Msmvosd')  # 千元单位的市值 / Price = 股数 × 价格，所以直接用千元市值再乘1000
-        lme = price * shares_outstanding * 1000      # 乘1000是因为数据单位是千元
-        return lme
+
 
     #Beta（CAPM Beta）
     def calc_capm(self, min_obs_corr=720, min_obs_vol=120):
@@ -2300,6 +2289,70 @@ class AShareMarket:
         result.set_index('Trdmnt', inplace=True)
 
         return result
+
+    #Rel2High（Closeness to past year high）
+    def calc_rel2high(self, window=12):
+        price = self.get_data('TRD_Mnth', 'Mclsprc') # 取月度收盘价
+        high = price.shift(1).rolling(window).max() # 计算过去12个月的最高价
+        rel2high = price.shift(1) / high
+        return rel2high
+
+    #Resid_Var(Residual Variance)
+    def calc_resid_var(self):
+        # 获取数据
+        ret = self.get_data('TRD_Mnth', ['Stkcd', 'Trdmnt', 'Mretwd'])  # 股票代码 月份日期 股票月收益率
+        rf = self.get_data('TRD_Nrrate', ['Nrrmtdt', 'Nrrdata'])       # 月份日期 月无风险利率
+        factor = self.get_data('STK_MKT_FIVEFACDAY', ['TradingDate', 'RiskPremium1', 'SMB1', 'HML1'])  # 月份日期 三因子数据
+        # 修改列名统一格式
+        rf.rename(columns={'Nrrmtdt': 'Trdmnt'}, inplace=True)
+        factor.rename(columns={'TradingDate': 'Trdmnt'}, inplace=True)
+        # 合并数据
+        df = ret.merge(rf, on='Trdmnt', how='left')
+        df = df.merge(factor, on='Trdmnt', how='left')
+        #计算超额收益
+        df['ExcessRet'] = df['Mretwd'] - df['Nrrdata'] / 100 
+
+        #初始化结果result
+        result = pd.DataFrame()
+        #用pivot让每只股票成为一列
+        panel = df.pivot(index='Trdmnt', columns='Stkcd', values='ExcessRet')
+        #整理三因子，变成同样的时间索引
+        x = df[['Trdmnt', 'RiskPremium1', 'SMB1', 'HML1']].drop_duplicates() #去掉重复的行，因为 df 里三因子数据在每个月是重复的（每只股票都会重复一次）
+        x.set_index('Trdmnt', inplace=True) #把月份设置成索引，方便和股票超额收益对齐
+        x = sm.add_constant(x)  # 加上回归的常数项
+
+        # 开始对每只股票进行滚动回归
+        for stock in panel.columns:  # 遍历每只股票
+            stock_ret = panel[stock].dropna()  # 获取当前股票的超额收益率，去掉空值
+            if len(stock_ret) < 720:  # 如果数据点少于720天，跳过
+            continue
+            stock_x = x.loc[stock_ret.index]  # 获取与当前股票日期对齐的三因子数据
+            stock_model = RollingOLS(stock_ret, stock_x, window=720, min_nobs=240).fit()  # 滚动回归
+            resid_var = stock_model.resid.rolling(12).var()  # 计算残差的12个月滚动方差
+            result[stock] = resid_var  # 将结果存入结果表中
+
+        result['Trdmnt'] = result.index.astype(str).str[:6]  # 提取年月
+        result.drop_duplicates(subset=['Trdmnt'], keep='last', inplace=True)  # 保留每月最后一天的数据
+        result.set_index('Trdmnt', inplace=True)  # 设置年月为索引  
+        return result
+
+
+    #ST_Rev（Short-term reversal）
+    def calc_strev(self):
+        price = self.get_data('TRD_Mnth', 'Mclsprc')  # 取月度收盘价
+        ret = (price.shift(1) - price.shift(2)) / price.shift(2)  # 计算收益率
+        return ret
+    
+    #C（Ratio of cash and short-term investments to total assets）
+    def calc_c(self):
+        cash = self.get_data('FS_Combas', 'A001101000') # 现金
+        short_inv = self.get_data('FS_Combas', 'A001109000') # 短期投资
+        total_assets = self.get_data('FS_Combas', 'A001000000') # 总资产
+        c = (cash + short_inv) / total_assets
+        return c
+    
+
+
         
 
 
